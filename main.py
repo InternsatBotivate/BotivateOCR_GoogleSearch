@@ -122,8 +122,6 @@ async def perform_ocr(request_data: OCRRequest):
 
         # === AI STEP 1: Extract data from image ===
         logger.info("Step 1: Sending image(s) to OpenAI for extraction...")
-        
-        # --- [UPDATED ACCURACY PROMPT] ---
         extract_prompt = """Analyze the image(s) of the business card and extract all key information.
         There may be a front and a back image. Look at BOTH images to find all details.
         **Pay extremely close attention to stylized logos, gradients, shadows, or complex animations.** Use context (like slogans or other text) to determine the most likely correct spelling.
@@ -133,7 +131,6 @@ async def perform_ocr(request_data: OCRRequest):
         
         image_list_content = [{"type": "text", "text": extract_prompt}]
         image_list_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image1}"}})
-        
         if base64_image2_cleaned:
             logger.info("Processing front and back images.")
             image_list_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image2_cleaned}"}})
@@ -145,8 +142,6 @@ async def perform_ocr(request_data: OCRRequest):
             messages=[{"role": "user", "content": image_list_content }],
             max_tokens=500
         )
-        # --- [END OF UPDATE] ---
-        
         ocr_data_str = extract_response.choices[0].message.content
         ocr_data = parse_openai_json(ocr_data_str)
         logger.info(f"Step 1: Received from OpenAI: {ocr_data}")
@@ -184,7 +179,7 @@ async def perform_ocr(request_data: OCRRequest):
             - Set 'is_validated' to true.
             - **Correct Data:** Correct any misspellings in the OCR 'company' or 'name' using the Google result.
             - **Enrich Website:** Fill in the 'website' field using the Google 'link'.
-            - **Set 'validation_source' to the Google 'link'.** (This is important for the hyperlink)
+            - **Set 'validation_source' to the Google 'link'.**
             - **Return all other OCR fields as-is** (we will search for more in the next step).
         3.  **If NO Genuine Match is Found:**
             - Set 'is_validated' to false.
@@ -200,11 +195,13 @@ async def perform_ocr(request_data: OCRRequest):
         validated_data = json.loads(validated_data_str)
         logger.info(f"Step 3: Received validated data: {validated_data}")
 
-        # === STEP 4: Targeted Search for ENRICHMENT (Unchanged) ===
+        # === STEP 4: Targeted Search for ENRICHMENT ===
         enrichment_search_results = None
         if validated_data.get("is_validated"):
             validated_company = validated_data.get("company")
-            contact_query = f'"{validated_company}" about company location contact info email phone address'
+            # --- [SLIGHTLY UPDATED QUERY] ---
+            contact_query = f'"{validated_company}" about description location contact info email phone address'
+            # --- [END OF UPDATE] ---
             logger.info(f"Step 4: Performing targeted enrichment search for: {contact_query}")
             enrichment_search_results = search_google(contact_query, num_results=3)
         else:
@@ -213,28 +210,30 @@ async def perform_ocr(request_data: OCRRequest):
         # === STEP 5: Final Merge and Enrichment ===
         if enrichment_search_results:
             logger.info("Step 5: Sending data to OpenAI for final merge...")
-            # --- [UPDATED ACCURACY PROMPT] ---
+            # --- [UPDATED PROMPT FOR RELIABILITY] ---
             final_merge_prompt = f"""
             You are a data enrichment assistant. I have partially validated data from a business card.
-            I have now performed a *second* Google search to find missing company details.
-            Your job is to merge this new information to create the most complete record.
-            The OCR data is just a starting point. **Prioritize the new information found in the search results** for filling in blank fields.
+            I have performed a *second* Google search to find missing company details like 'about', 'location', and contact info.
+            Your job is to merge this new information reliably.
 
-            Here is the data we have so far (after Step 3):
+            Here is the data we have so far (after Step 3 validation):
             {json.dumps(validated_data)}
 
             Here is the list of results from the *new* enrichment search:
             {json.dumps(enrichment_search_results)}
 
             **Instructions:**
-            1.  **Review Snippets:** Look at the 'snippet' for each search result.
-            2.  **Find Missing Info:** Find the first credible 'phone', 'email', 'address', 'about_the_company', and 'location' from the snippets.
-            3.  **Merge Data:** Return a final JSON object. Use the data from "data we have so far" as the base,
-                and **aggressively fill in any empty fields** with the information you just found.
-            4.  **Do not overwrite** data that already exists (e.g., if 'phone' was found on the card, keep it).
-            5.  Ensure 'validation_source' (the URL) is preserved.
+            1.  **Review Snippets Carefully:** Look through the 'snippet' and 'title' of **all** search results.
+            2.  **Extract Key Details:**
+                * `about_the_company`: Find a concise (1-2 sentence) description of what the company does.
+                * `location`: Find the city, state, or general region mentioned. If an address exists, extract the city/state from it.
+                * `phone`, `email`, `address`: Find the first credible contact details.
+            3.  **Merge Data:** Return a final JSON object. Use the data from "data we have so far" as the base.
+            4.  **Fill Empty Fields:** Use the details extracted in step 2 to fill ONLY the fields that are currently empty or contain just placeholder text.
+            5.  **Prioritize:** If multiple sources provide information for the same empty field, prioritize the most official-looking source (e.g., the company's own website snippet over a directory listing).
+            6.  **Do not overwrite** data that already exists unless the existing data is clearly wrong or a placeholder. Keep `validation_source` as it is.
 
-            Return a single, final JSON object.
+            Return a single, final JSON object including 'about_the_company' and 'location'.
             """
             # --- [END OF UPDATE] ---
             
